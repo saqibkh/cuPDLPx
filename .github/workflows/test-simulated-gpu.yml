@@ -1,0 +1,61 @@
+name: Test (simulated GPU)
+
+# Runs the test suite on a simulated NVIDIA T4 (PantheonSim) on a standard
+# runner, so the CUDA code paths execute on every PR rather than only compile.
+# The simulator interprets the compiled kernels on the CPU: it checks results,
+# not speed, so the wall-clock time-limit test is left out.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-simulated-gpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up a simulated T4
+        uses: pantheongpu/setup-pantheonsim@v0
+        with:
+          gpu: nvidia/t4
+          cuda-toolkit: "12.6"
+          # The build links the toolkit's own cuBLAS and cuSPARSE, so the
+          # simulator's libraries go only to the tests, through `vgpu run`.
+          library-path: false
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build zlib1g-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The simulator stands in for the CUDA runtime, so it must be linked
+      # dynamically; compute_75 PTX is what it executes.
+      - name: Build the C tests
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=75 \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared \
+            -DCUPDLPX_BUILD_TESTS=ON
+          cmake --build build
+
+      - name: Run the C tests
+        run: vgpu run ctest --test-dir build --output-on-failure --no-tests=error
+
+      - name: Build and install the Python package
+        env:
+          CMAKE_ARGS: -DCMAKE_CUDA_ARCHITECTURES=75 -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared
+        run: pip install ".[test]"
+
+      - name: Run the Python tests
+        run: vgpu run pytest --deselect test/test_limit.py::test_time_limit
